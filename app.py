@@ -62,3 +62,69 @@ def api_add_task():
         abort(400, "module und record_id sind Pflicht")
     res = zoho.crm_create_task(module, record_id, subject, due_in_days)
     return jsonify({"ok": True, "result": res})
+# app.py (Ergänzung oben hinzufügen)
+import os, re
+from flask import request
+
+CLIQ_SECRET = os.getenv("CLIQ_SECRET")  # in Render als ENV setzen
+
+def _ok(msg, card=None):
+    # einfache Antwort an Cliq
+    out = {"text": msg}
+    if card: out["card"] = card
+    return out
+
+@app.post("/cliq/ingest")
+def cliq_ingest():
+    # 1) Webhook-Authentifizierung prüfen (optional je nach Cliq-Konfiguration)
+    if CLIQ_SECRET and request.headers.get("X-Cliq-Token") != CLIQ_SECRET:
+        return {"text":"Unauthorized"}, 401
+
+    payload = request.get_json(force=True, silent=True) or {}
+    text = (payload.get("text") or "").strip()
+    user = payload.get("user", {}).get("name", "unknown")
+
+    # 2) Routing: Einfache Befehle -> CRM-Aktionen
+    # Beispiele:
+    # @mkbot notiz lead <id> <text>
+    m = re.match(r".*\bnotiz\s+lead\s+(\d+)\s+(.+)$", text, re.I)
+    if m:
+        lead_id, note_text = m.group(1), m.group(2)
+        res = zoho.crm_add_note("Leads", lead_id, "Notiz", note_text)
+        return _ok(f"📝 Notiz angelegt bei Lead {lead_id}.")
+
+    # @mkbot aufgabe lead <id> <betreff> [in <Tagen>]
+    m = re.match(r".*\baufgabe\s+lead\s+(\d+)\s+(.+?)(?:\s+in\s+(\d+))?$", text, re.I)
+    if m:
+        lead_id, subject, days = m.group(1), m.group(2), m.group(3) or "3"
+        res = zoho.crm_create_task("Leads", lead_id, subject, int(days))
+        return _ok(f"✅ Aufgabe '{subject}' in {days} Tag(en) erstellt (Lead {lead_id}).")
+
+    # @mkbot konvertiere lead <id>
+    m = re.match(r".*\bkonvertiere\s+lead\s+(\d+)$", text, re.I)
+    if m:
+        lead_id = m.group(1)
+        res = zoho.crm_convert_lead(lead_id)
+        return _ok(f"🔁 Lead {lead_id} konvertiert (Account/Contact/Deal).")
+
+    # @mkbot leads [limit]
+    m = re.match(r".*\bleads(?:\s+(\d+))?$", text, re.I)
+    if m:
+        limit = int(m.group(1) or "3")
+        data = zoho.crm_list_leads(limit=limit)
+        leads = data.get("data", [])
+        if not leads:
+            return _ok("Keine Leads gefunden.")
+        lines = [f"- {l.get('Company','')} | {l.get('Last_Name','?')} ({l.get('id')})" for l in leads]
+        return _ok("📋 Leads:\n" + "\n".join(lines))
+
+    # Fallback-Hilfe:
+    help_txt = (
+        "Befehle:\n"
+        "• @mkbot leads [3]\n"
+        "• @mkbot notiz lead <ID> <Text>\n"
+        "• @mkbot aufgabe lead <ID> <Betreff> [in <Tagen>]\n"
+        "• @mkbot konvertiere lead <ID>\n"
+        "• Mehr Aktionen? Schreib: @mkbot hilfe"
+    )
+    return _ok(help_txt)
